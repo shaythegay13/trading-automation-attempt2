@@ -1,0 +1,12 @@
+# Runtime dependencies for the read-only ingestion worker.
+# This file is the canonical list; pyproject.toml loads it.
+# Dev tools (pytest, ruff) are the "dev" extra: pip install -e ".[dev]"
+
+sqlalchemy[asyncio]>=2.0.36,<3
+asyncpg>=0.29.0,<1
+alembic>=1.13.0,<2
+httpx>=0.27.0,<1
+pydantic>=2.6.0,<3
+pydantic-settings>=2.2.0,<3
+python-dotenv>=1.0.0,<2
+rapidfuzz>=3.6.0,<4

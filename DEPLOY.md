@@ -14,23 +14,38 @@ Railway that means:
   health check (or set it to a TCP/none check) in the service settings, or the
   deploy will be marked unhealthy and restarted in a loop.
 - Start command: `python -m src.runner` (continuous mode — no `--single-run`).
+- Leave `LIVE_TRADING_ENABLED` unset. The worker is read-only public-data
+  ingestion. If that variable is true, the process exits on startup because
+  this repo has no order-placement client.
 
-## What's missing before this can deploy at all
+## Dependency install
 
-**No dependency manifest exists in the repo.** There's no `requirements.txt`,
-`pyproject.toml`, or `Pipfile` — dependencies were only ever installed ad hoc
-into a local `.venv`. Nixpacks (Railway's default Python builder) needs one of
-these to know what to install; without it the build has nothing to go on.
-Before deploying, generate one from the current working environment, e.g.:
+Runtime dependencies are declared in `requirements.txt`. `pyproject.toml`
+loads that file, so either of these installs the worker:
 
 ```bash
-pip freeze > requirements.txt
+pip install .
+pip install -r requirements.txt
 ```
 
-Current runtime dependencies (from the working `.venv`): `sqlalchemy`,
-`asyncpg`, `alembic`, `httpx`, `pydantic`, `pydantic-settings`,
-`python-dotenv`. (`pytest`, `pytest-asyncio`, `respx`, `vcrpy`, `mypy` are
-dev/test-only — fine to include or split into a `requirements-dev.txt`.)
+Nixpacks can build from either file. Test and lint tools (`pytest`,
+`pytest-asyncio`, `respx`, `ruff`) are the `dev` extra and are not required
+on the worker:
+
+```bash
+pip install -e ".[dev]"
+```
+
+## What's still missing before this can deploy
+
+The dependency manifest is no longer the blocker. These gaps remain:
+
+- No release command runs `alembic upgrade head` before the worker starts.
+- `DATABASE_URL` from Railway's Postgres plugin uses `postgresql://`, and this
+  app needs `postgresql+asyncpg://`. See the table below.
+- Monthly `market_snapshots` partitions are pre-created only through 2027-07.
+  Ingestion aborts when the current month's partition is missing.
+- Nothing in this repo has been deployed. The notes below are still a plan.
 
 ## Environment variables
 

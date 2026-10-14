@@ -1,4 +1,8 @@
-"""Snapshot loop runner for continuous multi-venue ingestion."""
+"""Snapshot loop runner for continuous multi-venue ingestion.
+
+Read-only. Venue clients fetch public market data with HTTP GET and persist
+snapshots. This process never submits, cancels, or amends orders.
+"""
 
 import argparse
 import asyncio
@@ -630,9 +634,9 @@ async def execute_snapshot_cycle() -> None:
     )
 
     # Print first-pass metrics / single-run special stats requested
-    print(f"\n==================================================")
-    print(f"SINGLE RUN METRICS REPORT")
-    print(f"==================================================")
+    print("\n==================================================")
+    print("SINGLE RUN METRICS REPORT")
+    print("==================================================")
     print(f"  Wall-clock Duration: {duration:.2f} seconds")
     print(f"  Total Kalshi Events: {k_events}")
     print(f"  Total Kalshi Markets (Tier-1): {k_markets}")
@@ -757,8 +761,26 @@ async def polymarket_loop() -> None:
         await asyncio.sleep(interval)
 
 
+def _refuse_live_trading() -> None:
+    """Stop startup when someone asks this build to trade.
+
+    Order placement is not implemented. The default is off. A true flag is
+    treated as a misconfiguration so the process cannot silently do nothing
+    while looking like a live trader.
+    """
+    if settings.live_trading_enabled:
+        raise RuntimeError(
+            "LIVE_TRADING_ENABLED is set, but this project has no order-placement "
+            "client. Refusing to start. Unset LIVE_TRADING_ENABLED to run read-only ingestion."
+        )
+    logger.info(
+        "Read-only ingestion: fetching public market data only. No orders will be submitted."
+    )
+
+
 async def main_loop(single_run: bool = False) -> None:
     """Main snapshot loop runner orchestrator."""
+    _refuse_live_trading()
     if single_run:
         logger.info("Running single ingestion cycle...")
         await execute_snapshot_cycle()
@@ -774,7 +796,12 @@ async def main_loop(single_run: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Prediction Market Screener Snapshot Loop Runner")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Prediction Market Screener snapshot loop. "
+            "Read-only: fetches public market data and does not place orders."
+        )
+    )
     parser.add_argument(
         "--single-run",
         action="store_true",

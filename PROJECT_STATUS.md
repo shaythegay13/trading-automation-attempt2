@@ -1,8 +1,14 @@
 # Project Status
 
-Last touched: 2026-07-25. This file is the "what was I doing" recap — read this
-before you read code. `README.md` is the architecture/config reference;
-`DEPLOY.md` is Railway deployment planning (not executed).
+Last touched: 2026-07-25, with a packaging pass on 2026-10-14. This file is the
+"what was I doing" recap — read this before you read code. `README.md` is the
+architecture/config reference; `DEPLOY.md` is Railway deployment planning
+(not executed).
+
+The 2026-10-14 pass added `requirements.txt`, `pyproject.toml`, GitHub Actions
+CI, and an explicit read-only startup guard (`LIVE_TRADING_ENABLED` defaults
+off and refuses to start if set, because there is still no order client).
+Ingestion behavior was not changed.
 
 ## Is anything running right now?
 
@@ -130,10 +136,11 @@ first.
 
 ## Explicitly NOT done — don't assume these exist
 
-- **No `requirements.txt` / `pyproject.toml` in the repo at all.**
-  Dependencies were only ever installed ad hoc into a local `.venv`. This
-  blocks any real deploy (Nixpacks/Railway has nothing to build from) — see
-  `DEPLOY.md` for the exact list of what needs to go in it.
+- **A dependency manifest now exists** (`requirements.txt`, loaded by
+  `pyproject.toml`). It was missing for the whole July session and blocked
+  any real deploy. Installing is `pip install .` (or `pip install -e ".[dev]"`
+  for tests and lint). What is still not wired is a Railway release command
+  for migrations — see `DEPLOY.md`.
 - **Retention (`KALSHI_RETENTION_MONTHS`) is implemented but has never been
   turned on or tested against a real old partition.** It's wired to drop
   partitions by calendar age, unconditional on market resolution status —

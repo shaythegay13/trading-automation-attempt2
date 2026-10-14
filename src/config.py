@@ -12,8 +12,13 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Database DSN (SQLAlchemy asyncpg format)
+    # Database DSN (SQLAlchemy asyncpg format).
+    # The default matches docker-compose.yml (local Postgres only).
     database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/pm_screener"
+
+    # Safety: this build only reads public market data. There is no order client.
+    # When true, the runner refuses to start instead of attempting to trade.
+    live_trading_enabled: bool = False
 
     # Kalshi tier-1: event-anchored ingestion interval (market-level quotes, no orderbook)
     kalshi_tier1_interval_seconds: int = 900  # 15 min
