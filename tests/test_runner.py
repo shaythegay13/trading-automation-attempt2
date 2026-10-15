@@ -2,10 +2,11 @@
 
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
+
 import pytest
 
 from src.clients.base import BaseVenueClient, NormalizedMarketDTO, NormalizedSnapshotDTO
-from src.runner import run_venue_pipeline, execute_snapshot_cycle, enforce_retention_policy
+from src.runner import enforce_retention_policy, execute_snapshot_cycle, run_venue_pipeline
 
 
 class DummySuccessClient(BaseVenueClient):

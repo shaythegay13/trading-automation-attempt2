@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timezone
+
 import pytest
 import respx
 from httpx import Response

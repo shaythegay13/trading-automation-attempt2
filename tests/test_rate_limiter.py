@@ -1,7 +1,9 @@
 """Unit tests for token bucket rate limiter."""
 
 import time
+
 import pytest
+
 from src.clients.rate_limiter import AsyncTokenBucket
 
 

@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from src.db.models import CrossVenueCandidate, Market, MarketSnapshot
+from src.db.models import Market, MarketSnapshot
 
 
 def test_market_instantiation():

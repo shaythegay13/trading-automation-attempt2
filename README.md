@@ -1,129 +1,141 @@
 # Prediction Market Screener
 
-An async multi-venue data ingestion and archival system for prediction market orderbooks. Supports Kalshi (Trade API v2) and Polymarket (Gamma + CLOB APIs).
+Read-only ingestion and archival for [Kalshi](https://kalshi.com) and [Polymarket](https://polymarket.com) order books. This is Shay Bouchles's second attempt at prediction-market trading automation. This attempt is the data layer: it watches public markets and stores snapshots in Postgres. It does not trade.
 
-**Coming back to this after a break? Read [`PROJECT_STATUS.md`](PROJECT_STATUS.md) first** — it has the current run state, the decisions behind the current config, and what's still open. This file is the architecture/config reference; that one is the "what am I doing" recap.
+> **Disclaimer.** This is an experimental project. It is not financial advice, not a broker, and not an offer to buy or sell any contract. Nothing here is a recommendation to enter a position. Market data can be missing, delayed, or wrong. The liquidity figures can be economically misleading (see below). If you trade on anything derived from this archive, you can lose money, including the entire amount you commit.
+
+The process is read-only by construction. Venue clients issue HTTP GET requests against public market-data endpoints and write rows to Postgres. There is no wallet, no API key, and no order, cancel, or amend path. `LIVE_TRADING_ENABLED` defaults to off. If it is set to true, the runner refuses to start, because this build has no execution client and should not pretend otherwise.
+
+Coming back after a break? [`PROJECT_STATUS.md`](PROJECT_STATUS.md) is the session log (decisions and open questions). This file is the architecture and setup reference. [`DEPLOY.md`](DEPLOY.md) is an undeployed Railway plan.
+
+## What it does
+
+Three independent async loops share one Postgres database:
+
+| Loop | Default cadence | What it stores |
+|---|---|---|
+| Kalshi Tier-1 | 15 min | Top-of-book quotes for non-excluded events, via `/events?with_nested_markets=true` |
+| Kalshi Tier-2 | 5 min | Full order-book depth for the top markets that pass a two-sided-book gate |
+| Polymarket | 5 min | Gamma metadata plus a CLOB book snapshot per outcome |
+
+A separate matcher (`src/matching/baseline.py`) can score Kalshi and Polymarket titles with `rapidfuzz` and store candidate pairs. The snapshot runner does not call it.
+
+Nothing is sent back to either venue.
 
 ## Architecture
 
 ```
 src/
-  config.py          — Pydantic-settings configuration (env / .env)
-  runner.py          — Snapshot loop: partition check → fetch → upsert
+  config.py            Settings (environment / .env), including the live-trading guard
+  runner.py            Snapshot loops: partition check, fetch, upsert
   clients/
-    base.py          — NormalizedMarketDTO, NormalizedSnapshotDTO, BaseVenueClient
-    kalshi.py        — Kalshi venue client (tiered event-anchored, 2 RPS rate-limited)
-    polymarket.py    — Polymarket Gamma + CLOB client
-    rate_limiter.py  — AsyncTokenBucket token-bucket rate limiter
+    base.py            NormalizedMarketDTO, NormalizedSnapshotDTO, BaseVenueClient
+    kalshi.py          Kalshi Trade API v2 client (public GET, tiered, rate-limited)
+    polymarket.py      Polymarket Gamma + CLOB client (public GET)
+    rate_limiter.py    Async token bucket
   analytics/
-    liquidity.py     — calculate_mid_price, calculate_liquidity_depth
+    liquidity.py       Mid price and notional depth near mid
   matching/
-    baseline.py      — Cross-venue title similarity
+    baseline.py        Cross-venue title similarity
   db/
-    models.py        — SQLAlchemy 2.0 ORM: Market, MarketSnapshot, CrossVenueCandidate
-    session.py       — Async session factory
-alembic/             — PostgreSQL migrations
-tests/               — pytest-asyncio + respx unit test suite
+    models.py          SQLAlchemy 2.0: Market, MarketSnapshot, CrossVenueCandidate
+    session.py         Async session factory
+alembic/               PostgreSQL migrations
+tests/                 pytest-asyncio + respx unit tests
 ```
 
-## Quick Start
+```
+Kalshi /events ──► Tier-1 quotes ──► markets + market_snapshots
+                         │
+                         ▼
+              gate (two-sided, spread, volume)
+                         │
+Kalshi /orderbook ─► Tier-2 depth (capped) ──► market_snapshots
+Polymarket Gamma + CLOB ──────────────────────► markets + market_snapshots
+```
+
+Snapshots are append-only and partitioned by month on `captured_at`. Migrations pre-create partitions from 2026-07 through 2027-07. The runner aborts if the current month's partition is missing, so later months need a new migration before they start.
+
+## Setup
+
+Requires Python 3.11+ and Docker (for local Postgres).
 
 ```bash
-# Start Postgres
-docker-compose up -d
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"    # runtime + pytest + ruff
 
-# Apply migrations
+docker compose up -d
 alembic upgrade head
 
-# Single ingestion cycle (both venues)
+# One cycle, then exit
 python -m src.runner --single-run
 
-# Continuous loop with concurrent pipeline loops
+# Three loops until Ctrl-C
 python -m src.runner
 ```
 
+`pip install .` or `pip install -r requirements.txt` installs the worker without test tools. `requirements.txt` is the runtime list; `pyproject.toml` loads it.
+
+The compose file publishes Postgres on `localhost:5432` with the database `pm_screener`. That matches the default `DATABASE_URL`. It is a local development database, not a hosted credential.
+
 ## Configuration
 
-All settings are read from environment variables or a `.env` file.
+Settings come from the environment or a `.env` file (`src/config.py`, pydantic-settings, case-insensitive). `.env.example` lists names only. Copy it to `.env` and uncomment a line only when you want to override the default. Do not commit `.env`.
 
-| Variable | Default | Description |
+| Variable | Default | Meaning |
 |---|---|---|
-| `DATABASE_URL` | `postgresql+asyncpg://...` | SQLAlchemy async DSN |
-| `KALSHI_TIER1_INTERVAL_SECONDS` | `900` | Ingestion loop interval for Kalshi Tier-1 (15 min) |
-| `KALSHI_TIER2_INTERVAL_SECONDS` | `300` | Ingestion loop interval for Kalshi Tier-2 (5 min) |
-| `POLYMARKET_INTERVAL_SECONDS` | `300` | Ingestion loop interval for Polymarket (5 min) |
-| `KALSHI_RATE_LIMIT_RPS` | `2.0` | Kalshi requests/second cap (500ms safety delay) |
-| `POLYMARKET_RATE_LIMIT_RPS` | `5.0` | Polymarket requests/second cap |
-| `MAX_SPREAD_FOR_TWO_SIDED` | `0.10` | Max (ask − bid) in probability units for `has_two_sided_book=True` |
-| `MIN_VOLUME_FOR_TIER2` | `0.0` | Minimum volume_fp to qualify for Tier-2 orderbook fetch. No floor — `TIER2_MAX_MARKETS_PER_CYCLE` bounds the work instead, so thin/forming books aren't excluded |
-| `TIER2_MAX_MARKETS_PER_CYCLE` | `250` | Hard cap on orderbook fetches per Tier-2 cycle, ranked by `volume_24h` DESC. Bounds cycle wall-clock regardless of gate size (2 RPS × 250 ≈ 125s) |
-| `TIER1_WRITE_UNCHANGED` | `False` | When `False`, a Tier-1 row is skipped if `(bid, ask, status)` match the market's last snapshot. Set `True` to write every row unconditionally |
-| `KALSHI_SLOW_TIER_INTERVAL_SECONDS` | `21600` | Heartbeat cadence (6h) for markets with no quote on either side — they still get at least one snapshot per interval even when unchanged |
-| `KALSHI_EXCLUDED_CATEGORIES` | `Sports` | Comma-separated Kalshi event categories excluded from Tier-1 entirely (matched on `event.category`; esports is filed under `Sports` too). Empty string disables |
-| `KALSHI_RETENTION_MONTHS` | `0` | Drop `market_snapshots` partitions older than N months, by calendar age alone. `0` disables — nothing is ever dropped |
-| `KALSHI_MAX_PAGES` | `1000` | Hard page cap kill switch on cursor pagination loops |
-| `LOG_LEVEL` | `INFO` | Python logging level (`sqlalchemy.engine` is pinned to `WARNING` regardless, so `DEBUG` here won't dump SQL statements) |
+| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/pm_screener` | Async SQLAlchemy DSN. Must use the `postgresql+asyncpg://` scheme. |
+| `LIVE_TRADING_ENABLED` | `false` | Must stay false. `true` makes the runner exit. There is no order client. |
+| `KALSHI_TIER1_INTERVAL_SECONDS` | `900` | Kalshi Tier-1 loop interval (15 min). |
+| `KALSHI_TIER2_INTERVAL_SECONDS` | `300` | Kalshi Tier-2 loop interval (5 min). |
+| `POLYMARKET_INTERVAL_SECONDS` | `300` | Polymarket loop interval (5 min). |
+| `POLL_INTERVAL_SECONDS` | `300` | Legacy. Not used by the current loops. |
+| `KALSHI_RATE_LIMIT_RPS` | `2.0` | Kalshi request cap. |
+| `POLYMARKET_RATE_LIMIT_RPS` | `5.0` | Polymarket request cap. |
+| `MAX_SPREAD_FOR_TWO_SIDED` | `0.10` | Max `(ask − bid)` in probability units for `has_two_sided_book`. |
+| `MIN_VOLUME_FOR_TIER2` | `0.0` | Volume floor for Tier-2. The per-cycle cap is the real bound. |
+| `TIER2_MAX_MARKETS_PER_CYCLE` | `250` | Order-book fetches per Tier-2 cycle, ranked by `volume_24h` descending. |
+| `TIER1_WRITE_UNCHANGED` | `false` | When false, skip a Tier-1 row whose `(bid, ask, status)` match the last snapshot. |
+| `KALSHI_SLOW_TIER_INTERVAL_SECONDS` | `21600` | Heartbeat (6 h) for markets with no quote on either side. |
+| `KALSHI_EXCLUDED_CATEGORIES` | `Sports` | Comma-separated Kalshi event categories dropped before Tier-1. Empty string disables the filter. Esports is filed under `Sports`. |
+| `KALSHI_RETENTION_MONTHS` | `0` | Drop `market_snapshots` partitions older than N calendar months. `0` keeps everything. |
+| `KALSHI_MAX_PAGES` | `1000` | Cursor-pagination kill switch. |
+| `LOG_LEVEL` | `INFO` | App log level. `sqlalchemy.engine` stays at `WARNING`. |
 
-## Ingestion Strategy
+## Ingestion strategy
 
-### Kalshi (Tiered Ingestion)
+### Kalshi
 
-Ingestion is event-anchored via `/events?with_nested_markets=true`.
-The flat `/markets` stream is intentionally **not** used because it is dominated by millions of combinatorial parlay legs (`KXMVESPORTSMULTIGAMEEXTENDED-*`) that have no `/events` entry and no tradeable liquidity. Instead, we use a tiered strategy:
+Ingestion is event-anchored. The flat `/markets` stream is not the discovery path: it is dominated by combinatorial parlay legs that have no `/events` entry and no tradeable book.
 
-*   **Tier 1 (Shallow, 15 min default):** Paginate `/events?with_nested_markets=true` to exhaustion to discover all genuine prediction markets and their top-of-book quotes (`yes_bid_dollars`, `yes_ask_dollars`, etc.). Snapshot rows are stored with `depth_fetched = false`, `liquidity_at_Nc = NULL`, and `raw_market = NULL` (the raw payload lives once, deduplicated, on the `markets` row — repeating it per snapshot was the single largest storage cost; see `PROJECT_STATUS.md`). A row is only written if `(bid, ask, status)` changed since that market's last snapshot, except markets with no quote on either side, which get a `KALSHI_SLOW_TIER_INTERVAL_SECONDS` heartbeat instead of being silently skipped forever. Markets under `KALSHI_EXCLUDED_CATEGORIES` are filtered out before any of this runs.
-*   **Tier 2 (Deep, 5 min default):** Find active markets whose latest snapshot is two-sided and narrow (`spread <= 0.10`), ranked by `volume_24h` DESC, capped to `TIER2_MAX_MARKETS_PER_CYCLE` per cycle. For these markets, fetch the full `/orderbook` depth and compute `liquidity_at_5c` / `liquidity_at_10c` with `depth_fetched = true` — these rows do keep `raw_market` + `raw_orderbook`, since that's genuinely per-capture data with no equivalent elsewhere. A hard per-cycle timeout means a slow cycle is abandoned rather than blocking the next one.
+- **Tier-1** paginates `/events?with_nested_markets=true` and stores top-of-book quotes with `depth_fetched = false`. `raw_market` is kept once on the `markets` row, not repeated on every Tier-1 snapshot. Unchanged `(bid, ask, status)` rows are skipped, except markets with no quote on either side, which get the slow heartbeat instead.
+- **Tier-2** selects active markets whose latest snapshot is two-sided and narrow (`spread <= MAX_SPREAD_FOR_TWO_SIDED`), ranked by `volume_24h`, capped at `TIER2_MAX_MARKETS_PER_CYCLE`. It fetches `/orderbook`, computes `liquidity_at_5c` and `liquidity_at_10c`, and stores those rows with `depth_fetched = true`. A cycle that exceeds its interval is abandoned rather than blocking the next one.
 
 ### Polymarket
 
-Ingested on a 5-minute loop. Fetches open markets from the Gamma API, and fetches CLOB orderbook snapshots for all returned markets, setting `depth_fetched = true` upon success.
+Every interval, the client loads open markets from the Gamma API and fetches a CLOB book for each outcome. Successful book fetches set `depth_fetched = true`.
 
-## `has_two_sided_book` Definition
+### `has_two_sided_book`
 
-A snapshot row is flagged `has_two_sided_book = true` if and only if:
+A snapshot is two-sided only when both `bid` and `ask` are present and `(ask − bid) <= MAX_SPREAD_FOR_TWO_SIDED`. The raw `spread` is always stored, so a tighter cap can be applied later in SQL without re-fetching.
 
-1.  Both `bid` and `ask` are non-NULL, **and**
-2.  `(ask − bid) ≤ MAX_SPREAD_FOR_TWO_SIDED` (default 0.10)
-
-The raw `spread` value is stored unconditionally so the cap can be re-tuned at query time without re-fetching data:
-
-```sql
--- Re-apply a tighter cap of 5¢ without re-ingesting
-SELECT * FROM market_snapshots WHERE spread <= 0.05;
-```
-
-## Known Limitations
-
-### `liquidity_at_5c` / `liquidity_at_10c` overstates depth for tail-priced markets
-
-`liquidity_at_Nc` sums notional dollar value of all resting orders within ±N cents of mid price. For markets priced near 0 or 1 (e.g. a "Yes" leg at 0.997), a single large resting bid at 0.997 is included in both the ±5¢ and ±10¢ windows and inflates the metric to multi-million-dollar figures.
-
-This liquidity is not practically accessible: a fill at 0.997 requires a counterparty willing to sell at that price, and the spread to the next real level can be the full remaining probability mass. The metric is arithmetically correct but economically misleading for tail-priced outcomes.
-
-**Affected patterns:**
-
-*   Kalshi esports near-resolved legs (e.g. bid=0.998, ask=None — not flagged `has_two_sided_book`)
-*   Polymarket extreme legs (e.g. "Will Kendrick Lamar be top artist?" No side at 0.997/0.998)
-
-**Workaround at query time:**
-
-```sql
--- Exclude tail-priced rows before aggregating liquidity
-SELECT * FROM market_snapshots
-WHERE has_two_sided_book = true
-  AND mid BETWEEN 0.10 AND 0.90;
-```
-
-### Cent-denominated fields
-
-Kalshi removed cent-denominated integer fields (`yes_bid`, `yes_ask`, `last_price`, `no_bid`, `no_ask`) from Market responses per changelog release Jan 15 2026 (https://docs.kalshi.com/changelog). The client logs a `WARNING` if any such field reappears in a response.
-
-### Known risk: host suspend on a local machine
-
-Running the continuous loop on a laptop or a Linux-on-Chromebook (Crostini) container means the entire process can be paused for an arbitrary stretch whenever the host device sleeps — confirmed via `journalctl` (`maitred: Received request to prepare to suspend`) after observing all three loops (Kalshi Tier-1, Tier-2, Polymarket) go silent in lockstep and resume together after ~11 minutes with no errors. This isn't a code bug: a suspended VM runs nothing, ours or the kernel's, until it's resumed, so independent asyncio tasks naturally resume together. It just means ingestion cadence has silent gaps whenever the host sleeps. For genuinely continuous operation, run this on infrastructure that doesn't suspend (see `DEPLOY.md`).
-
-## Running Tests
+## Tests and lint
 
 ```bash
-python -m pytest tests/ -v
+pytest -v
+ruff check .
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) installs the `dev` extra, runs Ruff, then runs the unit tests on Python 3.12. The tests mock HTTP (respx) and the database. CI does not start Postgres and does not call Kalshi or Polymarket.
+
+## Known limitations
+
+- **`liquidity_at_5c` / `liquidity_at_10c` overstates tail markets.** The metric sums notional within a few cents of mid. A contract priced near 0 or 1 can show a huge number that is not practically hittable. Filter with `has_two_sided_book` and a mid in a range such as `0.10` to `0.90` before aggregating.
+- **Retention is implemented and defaults off.** `KALSHI_RETENTION_MONTHS=0` is the only value that has been run. Turning it on drops partitions by calendar age, including markets that have not resolved.
+- **Partitions stop at 2027-07.** After that, ingestion refuses to start until a migration adds the new month.
+- **A sleeping laptop pauses every loop.** Continuous collection needs a host that does not suspend. See [`DEPLOY.md`](DEPLOY.md).
+- **No authenticated Kalshi API, and no WebSocket delta feed.** Depth is polled. Signed order entry was never built, on purpose.
+- **This has not been deployed.** [`DEPLOY.md`](DEPLOY.md) is planning notes only.
+
+The longer decision log is in [`PROJECT_STATUS.md`](PROJECT_STATUS.md).

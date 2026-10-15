@@ -21,6 +21,12 @@ venv/
 .coverage
 htmlcov/
 .mypy_cache/
+.ruff_cache/
+
+# Packaging
+*.egg-info/
+dist/
+build/
 
 # Claude Code local settings
 .claude/
